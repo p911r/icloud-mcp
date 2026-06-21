@@ -1,0 +1,40 @@
+# Read-only fork image for mike-tih/icloud-mcp.
+# Differences from upstream Dockerfile:
+#   1. Applies apply_readonly_patch.py to ./src BEFORE pip install (so the
+#      installed package has zero write/SMTP tools registered).
+#   2. Boots via run_readonly.py -> bearer-token-gated streamable HTTP at /mcp.
+#
+# Build:  docker build -f Dockerfile.readonly -t icloud-mcp-readonly .
+# (Railway: point the service at this Dockerfile.)
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml ./
+COPY src/ ./src/
+COPY apply_readonly_patch.py run_readonly.py ./
+
+# Enforce read-only at build time. --verify fails the build if any write tool
+# is still registered or any read tool went missing (upstream-drift guard).
+RUN python apply_readonly_patch.py --verify
+
+# Install the patched package + uvicorn (entrypoint server).
+RUN pip install --no-cache-dir . uvicorn
+
+RUN useradd --create-home --shell /bin/bash app \
+    && chown -R app:app /app
+USER app
+
+ENV PORT=8000
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
+
+CMD ["python", "run_readonly.py"]
